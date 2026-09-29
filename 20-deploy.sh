@@ -16,7 +16,8 @@ source "$(dirname "$0")/lib/common.sh"
 trap 'echo -e "\n\033[1;31m[실패] 20-deploy.sh:$LINENO 에서 중단 — /var/log/kolla/ 와 위 ansible 출력 확인\033[0m"' ERR
 
 require_nonroot
-[[ "$(whoami_role)" == "controller" ]] || die "controller에서 실행하세요"
+[[ "$(hostname)" == "$CTRL_HOST" ]] || die "controller($CTRL_HOST)에서 실행하세요"
+require_state   # CTRL_IP/CTRL_IF/COMP_IP/COMP_IF ← .state (10-deployer.sh)
 [[ -f "$INVENTORY" ]] || die "$INVENTORY 없음 — 10-deployer.sh 먼저"
 id -nG | grep -qw docker || die "docker 그룹 미반영 — SSH 재접속 후 다시"
 [[ -n "${TMUX:-}" ]] || warn "tmux 밖입니다. SSH가 끊기면 deploy가 중단됩니다 (tmux new -s kolla 권장)"

@@ -1,3 +1,4 @@
 env.sh
 *.bak
 kolla-backup/
+.state

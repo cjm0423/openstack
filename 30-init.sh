@@ -14,7 +14,8 @@ source "$(dirname "$0")/lib/common.sh"
 trap 'echo -e "\n\033[1;31m[실패] 30-init.sh:$LINENO 에서 중단\033[0m"' ERR
 
 require_nonroot
-[[ "$(whoami_role)" == "controller" ]] || die "controller에서 실행하세요"
+[[ "$(hostname)" == "$CTRL_HOST" ]] || die "controller($CTRL_HOST)에서 실행하세요"
+require_state   # CTRL_IP/CTRL_IF/COMP_IP/COMP_IF ← .state (10-deployer.sh)
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 [[ -f "$KOLLA_DIR/admin-openrc.sh" ]] || die "admin-openrc.sh 없음 — 20-deploy.sh 먼저"
@@ -23,7 +24,6 @@ source "$KOLLA_DIR/admin-openrc.sh"
 docker ps --format '{{.Names}}' | grep -q '^ovn_controller$' || die "ovn_controller 컨테이너 없음 — deploy 미완료"
 ip link show br-ex >/dev/null 2>&1 || die "br-ex 없음 — $EXT_IF 편입 실패 (docker exec openvswitch_vswitchd ovs-vsctl show)"
 openstack service list >/dev/null || die "openstack CLI 인증 실패"
-CTRL_IF="${CTRL_IF:-$(detect_iface)}"
 
 # ---------------------------------------------------------------------------
 log "[1/3] br-ex 게이트웨이 IP + NAT (systemd)"
