@@ -2,7 +2,7 @@
 # =============================================================================
 # 30-init.sh — controller에서, deploy 후 1회. 운영계 구축 기록 Step 6~7 이식.
 #
-#   [1/3] br-ex-gw.service — br-ex에 EXT_GW(env.sh) + MASQUERADE/FORWARD (재부팅 생존)   ← 운영계 함정 7·10
+#   [1/3] br-ex-gw.service — br-ex에 EXT_GW(env.sh) + MASQUERADE/FORWARD + VM→관리 영역 격리 (재부팅 생존)   ← 운영계 함정 7·10
 #   [2/3] provider_network(FIP 풀) · tenant_network · tenant_router(외부 IP 명시) · cirros · m1.tiny · SG   ← 함정 6·9
 #   [3/3] 스모크 테스트 안내 (compute 노드에 인스턴스가 뜨는지)
 #
@@ -31,6 +31,40 @@ log "[1/3] br-ex 게이트웨이 IP + NAT (systemd)"
 # br-ex는 deploy 후 OVS가 만들므로 부팅 때마다 docker 이후에 부여 (운영계 함정 7).
 # FORWARD는 kolla가 docker iptables 관리를 꺼서 ACCEPT지만 방어적으로 명시 (함정 10).
 # FIP 경로: 인스턴스 → geneve → controller(게이트웨이 섀시) → br-ex → 호스트 IP 스택 → MASQUERADE(${CTRL_IF})
+#
+# VM → 관리 영역 격리 (ISOLATE_VMS=yes): br-ex로 들어온 VM 트래픽이 호스트 IP 스택을 타므로
+#   INPUT  : EXT_CIDR 소스의 NEW 연결 전부 DROP — 목적지를 CTRL_IP로 한정하지 않는다
+#            (sshd 등이 0.0.0.0 에 떠 있어 EXT_GW·Tailscale IP로도 닿기 때문). NEW만이라 ctrl → VM 응답은 통과.
+#   FORWARD: EXT_CIDR → ctrl 직결 대역 전부(br-ex/EXT_CIDR·docker 브리지·tailscale 제외) + ISOLATE_EXTRA_CIDRS DROP.
+#            인터넷(MASQUERADE)은 그대로.
+# 순서: ACCEPT 규칙들 다음에 각 DROP을 지우고(-D, 중복까지) 다시 맨 위에 넣는다(-I) — -C 방식은 이후 -I ACCEPT에 밀려 순서가 뒤집힘.
+ISOLATE_VMS="${ISOLATE_VMS:-yes}"
+ISOLATE_EXTRA_CIDRS="${ISOLATE_EXTRA_CIDRS-100.64.0.0/10}"
+[[ "$ISOLATE_VMS" == "yes" || "$ISOLATE_VMS" == "no" ]] || die "env.sh ISOLATE_VMS 는 yes 또는 no (현재: $ISOLATE_VMS)"
+# ctrl에 직접 연결된 IPv4 대역 전부 (예: "210.94.240.0/24 dev enp7s0f0 proto kernel scope link src ...").
+# 제외: EXT_CIDR 자신(br-ex), docker 브리지(docker0, br-<12hex>), tailscale 인터페이스
+CONNECTED_CIDRS=()
+while read -r cidr _ dev _; do
+    [[ -n "$cidr" && "$cidr" != "$EXT_CIDR" ]] || continue
+    [[ "$dev" == "br-ex" || "$dev" == "docker0" || "$dev" =~ ^br-[0-9a-f]{12}$ || "$dev" == tailscale* ]] && continue
+    CONNECTED_CIDRS+=("$cidr")
+done < <(ip -4 route show proto kernel scope link)
+if [[ "$ISOLATE_VMS" == "yes" ]]; then
+    (( ${#CONNECTED_CIDRS[@]} > 0 )) || die "ctrl 직결 대역(proto kernel scope link 라우트)을 하나도 찾지 못했습니다"
+    ok "격리 대상: ${CONNECTED_CIDRS[*]} ${ISOLATE_EXTRA_CIDRS} (+ INPUT: ${EXT_CIDR} 발 NEW 전부)"
+    for c in "${CONNECTED_CIDRS[@]}"; do
+        C=$(cidr_conflicts "$TENANT_DNS/32" <<<"$c")
+        [[ -z "$C" ]] || warn "TENANT_DNS $TENANT_DNS 가 격리 대역 $c 안 — VM이 이 DNS에 못 닿음 (env.sh TENANT_DNS 변경)"
+    done
+fi
+ISO_RULES=("INPUT -s ${EXT_CIDR} -m conntrack --ctstate NEW -j DROP")
+for c in "${CONNECTED_CIDRS[@]}" $ISOLATE_EXTRA_CIDRS; do ISO_RULES+=("FORWARD -s ${EXT_CIDR} -d ${c} -j DROP"); done
+ISO_BLOCK="# --- VM → 관리 영역 격리 (ISOLATE_VMS=${ISOLATE_VMS}) — ACCEPT 다음에 지우고(-D), yes면 맨 위에 다시(-I) ---"
+for r in "${ISO_RULES[@]}"; do
+    ISO_BLOCK+=$'\n'"while iptables -D ${r} 2>/dev/null; do :; done"
+    if [[ "$ISOLATE_VMS" == "yes" ]]; then ISO_BLOCK+=$'\n'"iptables -I ${r}"; fi
+done
+
 sudo tee /usr/local/sbin/kolla-ext-gw.sh >/dev/null <<SH
 #!/usr/bin/env bash
 set -e
@@ -43,12 +77,13 @@ iptables -C FORWARD -s ${EXT_CIDR} -j ACCEPT 2>/dev/null \\
   || iptables -I FORWARD -s ${EXT_CIDR} -j ACCEPT
 iptables -C FORWARD -d ${EXT_CIDR} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \\
   || iptables -I FORWARD -d ${EXT_CIDR} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+${ISO_BLOCK}
 SH
 sudo chmod +x /usr/local/sbin/kolla-ext-gw.sh
 sudo tee /etc/systemd/system/br-ex-gw.service >/dev/null <<'UNIT'
 [Unit]
 Description=Assign gateway IP + NAT to br-ex for Neutron external network (SU-Cloud)
-After=docker.service
+After=docker.service tailscaled.service
 Requires=docker.service
 
 [Service]
@@ -62,6 +97,18 @@ UNIT
 sudo systemctl daemon-reload && sudo systemctl enable br-ex-gw.service >/dev/null && sudo systemctl restart br-ex-gw.service
 ip -4 addr show br-ex | grep -q "$EXT_GW" || die "br-ex에 $EXT_GW 부여 실패"
 ok "br-ex = $EXT_GW, MASQUERADE → $CTRL_IF"
+if [[ "$ISOLATE_VMS" == "yes" ]]; then
+    # iptables -S 의 1행은 정책(-P), 2행이 체인의 1번 규칙
+    FIRST_IN=$(sudo iptables -S INPUT | awk 'NR==2')
+    FIRST_FW=$(sudo iptables -S FORWARD | awk 'NR==2')
+    [[ "$FIRST_IN" == "-A INPUT -s ${EXT_CIDR} -m conntrack --ctstate NEW -j DROP" ]] \
+        || die "INPUT 1번 규칙이 격리 DROP이 아님: ${FIRST_IN:-없음} (sudo iptables -S INPUT)"
+    [[ "$FIRST_FW" == "-A FORWARD -s ${EXT_CIDR} -d "*" -j DROP" ]] \
+        || die "FORWARD 1번 규칙이 격리 DROP이 아님: ${FIRST_FW:-없음} (sudo iptables -S FORWARD)"
+    ok "VM 격리 적용: INPUT NEW DROP, FORWARD DROP → ${CONNECTED_CIDRS[*]} ${ISOLATE_EXTRA_CIDRS}"
+else
+    warn "ISOLATE_VMS=no — VM이 controller 호스트·관리 대역에 접근 가능 (격리 규칙 제거됨)"
+fi
 
 # ---------------------------------------------------------------------------
 log "[2/3] OpenStack 기본 리소스 (있으면 건너뜀)"
@@ -114,6 +161,7 @@ $(echo -e "\033[1;32m")=====================================================
   openstack server add floating ip smoke \$FIP
   ping -c3 \$FIP && ssh cirros@\$FIP                                     # 비밀번호 gocubsgo
   ssh cirros@\$FIP 'ping -c3 8.8.8.8'                                     # MASQUERADE 경로
+  ssh cirros@\$FIP 'for t in ${CTRL_IP} ${EXT_GW} 8.8.8.8; do ping -c1 -W2 \$t >/dev/null 2>&1 && echo "\$t 열림" || echo "\$t 막힘"; done'   # 격리: 앞 둘 막힘, 8.8.8.8 열림
 
 OVN 확인 (qrouter netns 없음 — 라우터는 OVN 논리 오브젝트):
   docker exec ovn_nb_db ovn-nbctl show

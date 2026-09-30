@@ -106,6 +106,9 @@ compute가 여러 대면 각 노드에서 00을 돌리고 `./10-deployer.sh <IP1
 | 8 | passwords.yml 즉시 백업 | 10 [3/7] |
 | 9 | `--dns-nameserver` | 30 [2/3] |
 | 10 | FORWARD ACCEPT 명시 | 30 [1/3] |
+| — | VM → ctrl 호스트/캠퍼스 LAN 접근 (br-ex 경유 INPUT/FORWARD) | 30 [1/3] |
+
+VM 격리(`ISOLATE_VMS=yes`): `INPUT -s EXT_CIDR --ctstate NEW DROP` + `FORWARD -s EXT_CIDR -d <ctrl 직결 대역 전부 — br-ex·docker 브리지·tailscale 제외>/ISOLATE_EXTRA_CIDRS DROP`. INPUT은 목적지를 `.180`으로 한정하지 않는다 — sshd가 `0.0.0.0:22`라 `192.168.200.1`·Tailscale IP로도 닿기 때문. `--ctstate NEW`라 ctrl → VM(FIP ping/ssh) 응답은 통과하고, 인터넷(MASQUERADE)은 그대로.
 
 (3번 "VIP=사설 IP"는 가비아 전용이라 해당 없음. 여기선 VIP = `.180`.)
 
