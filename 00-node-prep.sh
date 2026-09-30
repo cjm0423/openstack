@@ -77,7 +77,10 @@ sudo sed -i "/^127\.0\.1\.1[[:space:]]/d" /etc/hosts
 sudo sed -i "/[[:space:]]$MY_HOST\$/d" /etc/hosts
 printf '%s %s\n' "$MY_IP" "$MY_HOST" | sudo tee -a /etc/hosts >/dev/null
 [[ -d /etc/cloud/cloud.cfg.d ]] && echo 'manage_etc_hosts: false' | sudo tee /etc/cloud/cloud.cfg.d/99-kolla-hosts.cfg >/dev/null
-getent hosts "$MY_HOST" | grep -q "^${MY_IP}[[:space:]]" || die "$MY_HOST 가 $MY_IP 로 안 풀립니다"
+# `getent hosts | grep -q` 가 cmp1(24.04)에서 스크립트 안에서만 매번 실패(원인 미확정) → IPv4만 조회해 첫 결과를 직접 비교.
+# ahostsv4 는 kolla rabbitmq precheck(roles/rabbitmq/tasks/precheck.yml)와 같은 조회 방식.
+read -r RES_IP _ < <(getent ahostsv4 "$MY_HOST") || true
+[[ "${RES_IP:-}" == "$MY_IP" ]] || die "$MY_HOST 가 $MY_IP 로 안 풀립니다 (조회 결과: ${RES_IP:-없음})"
 ok "/etc/hosts: $MY_HOST=$MY_IP"
 
 # ---------------------------------------------------------------------------
