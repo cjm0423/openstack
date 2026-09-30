@@ -14,3 +14,4 @@
 | docker SDK: python이 externally-managed(24.04)이고 `virtualenv` 미지정이면 apt `python3-docker`/`python3-dbus` 설치, 아니면 pip `docker>=7.0.0` | 컬렉션 `roles/docker_sdk/defaults/main.yml` |
 | 컬렉션 버전 고정: `stable/2026.1` | `share/kolla-ansible/requirements.yml` |
 | 인벤토리 호스트별 `network_interface=...` override 가능 | `inventory/multinode` 주석 (`compute01 neutron_external_interface=eth0 api_interface=em1 ...`) |
+| `globals.yml`(과 `passwords.yml`)은 `-e @globals.yml` extra vars로 전달 → 인벤토리 호스트 변수보다 우선. 노드별 값(`network_interface` 등)은 globals에 두면 안 됨 | `kolla_ansible/ansible.py` `build_args` |

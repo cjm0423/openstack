@@ -165,13 +165,13 @@ sudo mkdir -p "$KOLLA_DIR" && sudo chown "$USER:$USER" "$KOLLA_DIR"
 cp -rn "$VENV/share/kolla-ansible/etc_examples/kolla/." "$KOLLA_DIR/"
 
 # 인벤토리: 앞부분(호스트 그룹)만 생성하고, [baremetal:children] 이후는 kolla 예제 그대로 붙인다.
-# compute 노드별 network_interface 는 호스트 변수 (NIC 이름이 노드마다 다를 수 있음)
+# 노드별 NIC 는 호스트 변수 (NIC 이름이 노드마다 다를 수 있음)
 # controller: ansible_connection=local + venv python. compute: SSH, 시스템 python (bootstrap이 python3-docker apt 설치)
 {
 cat <<INV
 # 10-deployer.sh 생성 — 손대지 말고 env.sh 수정 후 재실행
 [control]
-${CTRL_HOST} ansible_host=${CTRL_IP} ansible_connection=local ansible_python_interpreter=${VENV}/bin/python3
+${CTRL_HOST} ansible_host=${CTRL_IP} ansible_connection=local ansible_python_interpreter=${VENV}/bin/python3 network_interface=${CTRL_IF}
 
 [network]
 ${CTRL_HOST}
@@ -212,7 +212,7 @@ cat >> "$KOLLA_DIR/globals.yml" <<GL
 # --- 기본 ---
 kolla_base_distro: "ubuntu"
 kolla_internal_vip_address: "${CTRL_IP}"    # haproxy 없음 → VIP = controller 관리 IP. compute는 이 주소로 API 접근
-network_interface: "${CTRL_IF}"             # compute는 인벤토리 호스트 변수로 override
+# 노드별 인터페이스는 인벤토리 호스트 변수로 — globals.yml은 extra vars라 여기 두면 호스트 변수를 덮어씀
 neutron_external_interface: "${EXT_IF}"     # network 그룹(controller)에서만 br-ex에 편입됨 (kolla openvswitch/post-config.yml 조건)
 $( [[ -n "${EXTERNAL_FQDN:-}" ]] && echo "kolla_external_fqdn: \"${EXTERNAL_FQDN}\"    # public 엔드포인트/Horizon 이름 (haproxy 없이 미검증)" || true )
 
