@@ -2,7 +2,7 @@
 # =============================================================================
 # 30-init.sh — controller에서, deploy 후 1회. 운영계 구축 기록 Step 6~7 이식.
 #
-#   [1/3] br-ex-gw.service — br-ex에 192.168.200.1/24 + MASQUERADE/FORWARD (재부팅 생존)   ← 운영계 함정 7·10
+#   [1/3] br-ex-gw.service — br-ex에 EXT_GW(env.sh) + MASQUERADE/FORWARD (재부팅 생존)   ← 운영계 함정 7·10
 #   [2/3] provider_network(FIP 풀) · tenant_network · tenant_router(외부 IP 명시) · cirros · m1.tiny · SG   ← 함정 6·9
 #   [3/3] 스모크 테스트 안내 (compute 노드에 인스턴스가 뜨는지)
 #
@@ -14,8 +14,8 @@ source "$(dirname "$0")/lib/common.sh"
 trap 'echo -e "\n\033[1;31m[실패] 30-init.sh:$LINENO 에서 중단\033[0m"' ERR
 
 require_nonroot
+require_state   # CTRL_HOST/IP/IF, COMP_HOSTS/IPS/IFS, VIRT_TYPE, TENANT_DNS ← .state (10-deployer.sh)
 [[ "$(hostname)" == "$CTRL_HOST" ]] || die "controller($CTRL_HOST)에서 실행하세요"
-require_state   # CTRL_IP/CTRL_IF/COMP_IP/COMP_IF ← .state (10-deployer.sh)
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 [[ -f "$KOLLA_DIR/admin-openrc.sh" ]] || die "admin-openrc.sh 없음 — 20-deploy.sh 먼저"
@@ -109,7 +109,7 @@ $(echo -e "\033[1;32m")=====================================================
 스모크 테스트 (인스턴스가 compute 노드에 스케줄되는지):
   openstack keypair create --public-key ~/.ssh/id_ed25519.pub ctrl-key >/dev/null
   openstack server create --image cirros --flavor m1.tiny --network tenant_network --key-name ctrl-key smoke
-  openstack server show smoke -c OS-EXT-SRV-ATTR:host -c status         # host = ${COMP_HOST}, ACTIVE
+  openstack server show smoke -c OS-EXT-SRV-ATTR:host -c status         # host = ${COMP_HOSTS[*]} 중 하나, ACTIVE
   FIP=\$(openstack floating ip create provider_network -f value -c floating_ip_address)
   openstack server add floating ip smoke \$FIP
   ping -c3 \$FIP && ssh cirros@\$FIP                                     # 비밀번호 gocubsgo
@@ -117,6 +117,6 @@ $(echo -e "\033[1;32m")=====================================================
 
 OVN 확인 (qrouter netns 없음 — 라우터는 OVN 논리 오브젝트):
   docker exec ovn_nb_db ovn-nbctl show
-  docker exec ovn_sb_db ovn-sbctl show                                    # chassis 2개, controller가 gateway
+  docker exec ovn_sb_db ovn-sbctl show                                    # chassis = 노드 수, controller가 gateway
   docker exec openvswitch_vswitchd ovs-vsctl show                          # br-ex 포트에 ${EXT_IF}, br-int 에 geneve 터널
 MSG

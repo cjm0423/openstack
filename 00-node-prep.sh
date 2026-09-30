@@ -1,28 +1,30 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 00-node-prep.sh — 두 노드 모두에서 실행 (controller 먼저, 그다음 compute)
+# 00-node-prep.sh — 모든 노드에서 실행 (controller 먼저, 그다음 compute 각각)
 #
 # 역할은 --role 로 반드시 지정 (IP로 판정하지 않음).
 # IP는 OS 설치 때 고정으로 잡는다는 전제 — 이 스크립트는 netplan을 쓰지 않고 읽기만 한다.
+# 호스트명: --hostname > (controller면) env.sh CTRL_HOST > 현재 hostname. 인벤토리 이름이 되므로 노드끼리 겹치면 안 됨.
 #
 # 하는 일:
-#   [1/5] 환경 점검 (24.04, NOPASSWD sudo, 관리 IP 읽기 + 운영계 IP 가드 + DHCP 금지, gw ping, compute면 /dev/kvm)
+#   [1/5] 환경 점검 (24.04, NOPASSWD sudo, 관리 IP 읽기 + 보호 IP 가드 + DHCP 금지, gw ping, compute면 /dev/kvm)
 #   [2/5] 호스트명 + /etc/hosts (127.0.1.1 삭제, 자기 IP 한 줄)           ← 운영계 함정 1
-#   [3/5] 패키지 + chrony + sysctl (ip_forward, rp_filter=2)              ← 운영계 함정 2
+#   [3/5] 패키지 + chrony (+ TIMEZONE) + sysctl (ip_forward, rp_filter=2)  ← 운영계 함정 2
 #   [4/5] controller만: veth-setup.service (veth0 미부착)                  ← 운영계 함정 5
 #   [5/5] controller만: SSH 키 생성 → compute 접근 안내
 #
-# 실행: ./00-node-prep.sh --role controller|compute   (재실행 안전)
+# 실행: ./00-node-prep.sh --role controller|compute [--hostname 이름]   (재실행 안전)
 # =============================================================================
 set -euo pipefail
 SCRIPT_TAG="node-prep"
 source "$(dirname "$0")/lib/common.sh"
 trap 'echo -e "\n\033[1;31m[실패] 00-node-prep.sh:$LINENO 에서 중단\033[0m"' ERR
 
-ROLE=""
+ROLE=""; HOST_ARG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --role) [[ $# -ge 2 ]] || die "--role 뒤에 controller|compute"; ROLE="$2"; shift 2 ;;
+        --role)     [[ $# -ge 2 ]] || die "--role 뒤에 controller|compute"; ROLE="$2"; shift 2 ;;
+        --hostname) [[ $# -ge 2 ]] || die "--hostname 뒤에 이름"; HOST_ARG="$2"; shift 2 ;;
         *) die "알 수 없는 옵션: $1" ;;
     esac
 done
@@ -31,13 +33,16 @@ done
 log "[1/5] 환경 점검"
 # ---------------------------------------------------------------------------
 case "$ROLE" in
-    controller) MY_HOST="$CTRL_HOST"; MY_IF="${CTRL_IF:-$(detect_iface)}" ;;
-    compute)    MY_HOST="$COMP_HOST"; MY_IF="${COMP_IF:-$(detect_iface)}" ;;
+    controller) MY_HOST="${HOST_ARG:-$(env_get CTRL_HOST)}"; MY_IF="$(env_get CTRL_IF)" ;;
+    compute)    MY_HOST="$HOST_ARG";                         MY_IF="$(env_get COMP_IF)" ;;
     "") die "--role controller|compute 를 지정하세요" ;;
     *)  die "--role 은 controller 또는 compute (받은 값: $ROLE)" ;;
 esac
+MY_HOST="${MY_HOST:-$(hostname)}"
+MY_IF="${MY_IF:-$(detect_iface)}"
+valid_hostname "$MY_HOST" || die "호스트명 '$MY_HOST' 사용 불가 (소문자·숫자·- 만, localhost 금지) — --hostname 으로 지정"
 require_nonroot; require_ubuntu2404; ensure_nopasswd_sudo
-[[ "$USER" == "$NODE_USER" ]] || warn "현재 유저 $USER ≠ NODE_USER=$NODE_USER — 두 노드에서 같은 유저로 배포해야 합니다"
+[[ "$USER" == "$NODE_USER" ]] || warn "현재 유저 $USER ≠ NODE_USER=$NODE_USER — 모든 노드에서 같은 유저로 배포해야 합니다"
 
 [[ -n "$MY_IF" ]] || die "관리 NIC를 찾지 못했습니다 (기본 라우트 없음 — env.sh CTRL_IF/COMP_IF 를 지정)"
 ip link show "$MY_IF" >/dev/null || die "NIC $MY_IF 가 없습니다"
@@ -53,7 +58,7 @@ echo "  호스트 : $MY_HOST  ($MY_IP via $MY_IF, MAC $MY_MAC, gw ${NET_GW:-없�
 if [[ -z "$NET_GW" ]]; then
     warn "기본 게이트웨이 없음 — 설치 시 gateway를 넣었는지 확인"
 else
-    ping -c1 -W2 "$NET_GW" >/dev/null || warn "게이트웨이 $NET_GW 응답 없음 — MAC 미등록이면 개발계 7월과 같은 증상(ARP는 되고 IP는 안 됨). 교수님께 MAC $MY_MAC 등록 요청"
+    ping -c1 -W2 "$NET_GW" >/dev/null || warn "게이트웨이 $NET_GW 응답 없음 — 스위치에 MAC 필터가 있으면 미등록 증상(ARP는 되고 IP는 안 됨). MAC $MY_MAC 등록 확인"
 fi
 if [[ "$ROLE" == "compute" || "$CTRL_IS_COMPUTE" == "yes" ]]; then
     if [[ -e /dev/kvm ]]; then ok "/dev/kvm 있음 (KVM 가속)"; else warn "/dev/kvm 없음 — BIOS에서 VT-x/AMD-V 켜기. 이대로면 10-deployer.sh 가 중단함"; fi
@@ -67,7 +72,7 @@ log "[2/5] 호스트명 + /etc/hosts"
 # ---------------------------------------------------------------------------
 [[ "$(hostname)" == "$MY_HOST" ]] || sudo hostnamectl set-hostname "$MY_HOST"
 # 운영계 함정 1: 127.0.1.1 <호스트명> 줄이 남으면 RabbitMQ가 루프백에 바인드. 삭제 후 자기 IP 한 줄만(tee -a 누적 금지).
-# 상대 노드 이름은 bootstrap-servers(kolla etc_hosts 롤)가 인벤토리 기준으로 두 노드에 등록한다.
+# 다른 노드 이름은 bootstrap-servers(kolla etc_hosts 롤)가 인벤토리 기준으로 모든 노드에 등록한다.
 sudo sed -i "/^127\.0\.1\.1[[:space:]]/d" /etc/hosts
 sudo sed -i "/[[:space:]]$MY_HOST\$/d" /etc/hosts
 printf '%s %s\n' "$MY_IP" "$MY_HOST" | sudo tee -a /etc/hosts >/dev/null
@@ -82,7 +87,7 @@ sudo apt-get update -y
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
     chrony curl wget git tmux python3-dev python3-venv libffi-dev gcc \
     libdbus-1-dev libglib2.0-dev pkg-config
-sudo timedatectl set-timezone Asia/Seoul || true
+if [[ -n "${TIMEZONE:-}" ]]; then sudo timedatectl set-timezone "$TIMEZONE"; fi
 sudo systemctl enable --now chrony
 # 운영계 함정 2: rp_filter strict면 FIP 응답 무로그 drop. ip_forward는 kolla가 docker 쪽을 끄므로 직접.
 sudo tee /etc/sysctl.d/99-kolla.conf >/dev/null <<'SYS'
@@ -126,20 +131,22 @@ ok "$EXT_IF / $EXT_IF_PEER UP (미부착)"
 # ---------------------------------------------------------------------------
 log "[5/5] SSH 키 (controller → compute)"
 # ---------------------------------------------------------------------------
-[[ -f ~/.ssh/id_ed25519 ]] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -C "$NODE_USER@$CTRL_HOST" >/dev/null
+[[ -f ~/.ssh/id_ed25519 ]] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -C "$NODE_USER@$MY_HOST" >/dev/null
 echo "  공개키: $(cat ~/.ssh/id_ed25519.pub)"
 cat <<MSG
 
-controller($MY_IP) 준비 끝. 다음:
-  1) compute에서   ./00-node-prep.sh --role compute
-  2) 다시 여기서   ./10-deployer.sh <compute IP>   (키가 없으면 ssh-copy-id 를 한 번 물어봄)
+controller $MY_HOST($MY_IP) 준비 끝. 다음:
+  1) compute 각각에서   ./00-node-prep.sh --role compute [--hostname 이름]
+  2) 다시 여기서        ./10-deployer.sh --discover <compute IP> [<compute IP> ...]   (탐색 결과만 확인)
+                        ./10-deployer.sh <compute IP> [<compute IP> ...]              (배포 준비, 키가 없으면 ssh-copy-id 1회)
 MSG
 else
 log "[4/5] compute: veth 불필요 (OVN 게이트웨이 섀시 = network 그룹 = controller)"
 log "[5/5] compute 준비 끝"
 cat <<MSG
 
-controller에서 ./10-deployer.sh $MY_IP 를 실행하면 이 노드로 SSH 접속해 bootstrap-servers 를 돌립니다.
+compute $MY_HOST($MY_IP) 준비 끝. controller에서 ./10-deployer.sh 의 인자로 $MY_IP 를 넣으면
+이 노드로 SSH 접속해 탐색하고 bootstrap-servers 를 돌립니다.
   확인(controller에서): ssh $NODE_USER@$MY_IP 'sudo -n true && echo sudo-ok'
 MSG
 fi
